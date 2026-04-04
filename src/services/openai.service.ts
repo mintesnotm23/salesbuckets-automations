@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { config } from "../config";
+import { validateStructuredIssue } from "../utils/helpers";
 
 const openai = new OpenAI({ apiKey: config.openai.apiKey });
 
@@ -43,9 +44,53 @@ Return ONLY valid JSON, no markdown fences.`,
   if (!content) throw new Error("Empty response from OpenAI");
 
   try {
-    return JSON.parse(content) as StructuredIssue;
-  } catch {
-    throw new Error(`Failed to parse AI response as JSON: ${content.slice(0, 200)}`);
+    const parsed = JSON.parse(content);
+    return validateStructuredIssue(parsed);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new Error(`Failed to parse AI response as JSON: ${content.slice(0, 200)}`);
+    }
+    throw error;
+  }
+}
+
+export async function applyConversationalEdit(
+  currentIssue: StructuredIssue,
+  userInstruction: string
+): Promise<StructuredIssue> {
+  const response = await openai.chat.completions.create({
+    model: config.openai.model,
+    messages: [
+      {
+        role: "system",
+        content: `You are editing a Jira issue based on the user's instruction. You are given the current issue as JSON and the user's edit request.
+
+Rules:
+- Only change what the user asks for. Keep everything else the same.
+- priority must be one of: "Highest", "High", "Medium", "Low", "Lowest"
+- labels must be an array of strings
+- acceptanceCriteria must be an array of strings
+- Return ONLY valid JSON, no markdown fences.`,
+      },
+      {
+        role: "user",
+        content: `Current issue:\n${JSON.stringify(currentIssue, null, 2)}\n\nUser's edit request: ${userInstruction}`,
+      },
+    ],
+    temperature: 0.2,
+  });
+
+  const content = response.choices[0].message.content;
+  if (!content) throw new Error("Empty response from OpenAI");
+
+  try {
+    const parsed = JSON.parse(content);
+    return validateStructuredIssue(parsed);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new Error(`Failed to parse AI edit response: ${content.slice(0, 200)}`);
+    }
+    throw error;
   }
 }
 

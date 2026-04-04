@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from "axios";
+import FormData from "form-data";
 import { config } from "../config";
 
 export interface JiraIssueResult {
@@ -67,11 +68,29 @@ class JiraService {
       },
     });
 
+    const { key, id } = response.data;
+    if (!key || !id) {
+      throw new Error(`Invalid Jira response: missing key or id`);
+    }
+
     return {
-      key: response.data.key,
-      id: response.data.id,
-      url: `${config.jira.baseUrl}/browse/${response.data.key}`,
+      key,
+      id,
+      url: `${config.jira.baseUrl}/browse/${key}`,
     };
+  }
+
+  async addAttachment(issueKey: string, fileBuffer: Buffer, filename: string): Promise<void> {
+    const form = new FormData();
+    form.append("file", fileBuffer, { filename });
+
+    await this.client.post(`/issue/${issueKey}/attachments`, form, {
+      headers: {
+        ...form.getHeaders(),
+        "X-Atlassian-Token": "no-check",
+      },
+      maxContentLength: 20 * 1024 * 1024, // 20MB
+    });
   }
 }
 
