@@ -128,18 +128,21 @@ export async function extractIssuesFromMeetingNotes(notes: string): Promise<Extr
     messages: [
       {
         role: "system",
-        content: `You extract actionable issues (bugs, tasks, feature requests) from meeting notes. Return a JSON array of objects with: title, description, priority ("High", "Medium", "Low"). Only include items that are clearly actionable. Return ONLY valid JSON, no markdown fences. If no issues found, return an empty array.`,
+        content: `You are a JSON-only API. Extract actionable issues (bugs, tasks, feature requests) from meeting notes. Return a JSON object with a single key "issues" containing an array of objects with: title, description, priority ("High", "Medium", "Low"). Only include clearly actionable items. If no issues found, return {"issues": []}. NEVER return explanatory text. ONLY return valid JSON.`,
       },
       { role: "user", content: notes },
     ],
     temperature: 0.2,
+    response_format: { type: "json_object" },
   });
 
+  if (!response.choices?.length) return [];
   const content = response.choices[0].message.content;
   if (!content) return [];
 
   try {
-    return JSON.parse(content) as ExtractedIssue[];
+    const parsed = JSON.parse(content);
+    return Array.isArray(parsed.issues) ? parsed.issues as ExtractedIssue[] : [];
   } catch {
     console.error("Failed to parse extracted issues:", content.slice(0, 200));
     return [];

@@ -66,7 +66,13 @@ export async function processMeetingNotes(params: MeetingNotesInput) {
 
   for (const issue of issues) {
     try {
-      const value = JSON.stringify(issue).slice(0, 2000);
+      // Safely truncate fields to fit Slack's 2000 char value limit
+      const safeIssue = {
+        title: issue.title.slice(0, 200),
+        description: issue.description.slice(0, 500),
+        priority: issue.priority,
+      };
+      const value = JSON.stringify(safeIssue);
       await slack.chat.postMessage({
         channel: issuesChannelId,
         blocks: [

@@ -185,45 +185,49 @@ export function registerIssueCommand(app: App) {
 
     // Handle file attachments
     if (msg.files && msg.files.length > 0) {
-      for (const file of msg.files) {
-        if (file.size && file.size > MAX_FILE_SIZE) {
-          await client.chat.postMessage({
-            channel: entry.channelId,
-            thread_ts: entry.messageTs,
-            text: `:warning: File \`${file.name}\` is too large (max 10MB). Skipped.`,
-          });
-          continue;
+      try {
+        for (const file of msg.files) {
+          if (file.size && file.size > MAX_FILE_SIZE) {
+            await client.chat.postMessage({
+              channel: entry.channelId,
+              thread_ts: entry.messageTs,
+              text: `:warning: File \`${file.name}\` is too large (max 10MB). Skipped.`,
+            });
+            continue;
+          }
+
+          // Dedup by filename
+          const existing = entry.attachments.find((a) => a.name === file.name);
+          if (existing) {
+            existing.url = file.url_private_download || file.url_private || "";
+            await client.chat.postMessage({
+              channel: entry.channelId,
+              thread_ts: entry.messageTs,
+              text: `:paperclip: Updated \`${file.name}\`.`,
+            });
+          } else {
+            entry.attachments.push({
+              url: file.url_private_download || file.url_private || "",
+              name: file.name || "unnamed",
+              mimetype: file.mimetype || "application/octet-stream",
+            });
+            await client.chat.postMessage({
+              channel: entry.channelId,
+              thread_ts: entry.messageTs,
+              text: `:paperclip: Attached \`${file.name}\` — will be uploaded to Jira when you confirm.`,
+            });
+          }
         }
 
-        // Dedup by filename
-        const existing = entry.attachments.find((a) => a.name === file.name);
-        if (existing) {
-          existing.url = file.url_private_download || file.url_private || "";
-          await client.chat.postMessage({
-            channel: entry.channelId,
-            thread_ts: entry.messageTs,
-            text: `:paperclip: Updated \`${file.name}\`.`,
-          });
-        } else {
-          entry.attachments.push({
-            url: file.url_private_download || file.url_private || "",
-            name: file.name || "unnamed",
-            mimetype: file.mimetype || "application/octet-stream",
-          });
-          await client.chat.postMessage({
-            channel: entry.channelId,
-            thread_ts: entry.messageTs,
-            text: `:paperclip: Attached \`${file.name}\` — will be uploaded to Jira when you confirm.`,
-          });
-        }
+        await client.chat.update({
+          channel: entry.channelId,
+          ts: entry.messageTs,
+          blocks: buildIssuePreview(entry.data, entry.attachments.length),
+          text: `Issue preview: ${entry.data.title}`,
+        });
+      } catch (error) {
+        console.error("Error handling file attachment:", error instanceof Error ? error.message : error);
       }
-
-      await client.chat.update({
-        channel: entry.channelId,
-        ts: entry.messageTs,
-        blocks: buildIssuePreview(entry.data, entry.attachments.length),
-        text: `Issue preview: ${entry.data.title}`,
-      });
 
       entry.expiresAt = Date.now() + PENDING_TTL_MS;
       return;
@@ -504,12 +508,16 @@ export function registerIssueCommand(app: App) {
     const metadata = JSON.parse(view.private_metadata || "{}");
     if (!metadata.channelId || !metadata.messageTs) return;
 
+    // Validate required fields
+    if (!title.trim()) return;
+    if (!description.trim()) return;
+
     const pendingKey = getPendingKey(body.user.id, metadata.channelId);
     const entry = pendingIssues.get(pendingKey);
 
     const updated: StructuredIssue = {
-      title,
-      description,
+      title: title.trim(),
+      description: description.trim(),
       priority: priority as StructuredIssue["priority"],
       labels,
       acceptanceCriteria,
