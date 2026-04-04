@@ -1,4 +1,5 @@
 import { App, ExpressReceiver } from "@slack/bolt";
+import express from "express";
 import { config } from "./config";
 import { registerIssueCommand } from "./commands/issue.command";
 import { registerAskCommand } from "./commands/ask.command";
@@ -21,7 +22,8 @@ registerIssueCommand(app);
 registerAskCommand(app);
 registerMeetingActions(app);
 
-// --- Webhook Routes ---
+// JSON body parsing for custom routes (ExpressReceiver doesn't include this)
+receiver.router.use(express.json());
 
 // Health check
 receiver.router.get("/health", (_req, res) => {
