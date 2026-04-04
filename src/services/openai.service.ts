@@ -24,20 +24,22 @@ export async function structureIssue(rawText: string): Promise<StructuredIssue> 
     messages: [
       {
         role: "system",
-        content: `You are a project manager assistant. Given a rough issue description from a developer, structure it into a well-formatted Jira ticket.
+        content: `You are a JSON-only API. You receive a rough issue description and return a structured Jira ticket as JSON.
 
-Return a JSON object with:
-- title: concise issue title (imperative form, e.g. "Add pagination to user list")
-- description: detailed description in markdown format
-- acceptanceCriteria: array of acceptance criteria strings
-- priority: one of "Highest", "High", "Medium", "Low", "Lowest"
-- labels: array of relevant labels (e.g. "bug", "feature", "enhancement", "refactor", "documentation")
+ALWAYS return a JSON object with these exact fields:
+- "title": concise issue title (imperative form)
+- "description": detailed description
+- "acceptanceCriteria": array of acceptance criteria strings
+- "priority": one of "Highest", "High", "Medium", "Low", "Lowest"
+- "labels": array of labels (e.g. "bug", "feature", "enhancement")
 
-Return ONLY valid JSON, no markdown fences.`,
+NEVER return explanatory text, apologies, or questions. ONLY return valid JSON. No markdown fences.
+Even if the input is vague, always produce your best-effort JSON response.`,
       },
       { role: "user", content: rawText },
     ],
     temperature: 0.3,
+    response_format: { type: "json_object" },
   });
 
   if (!response.choices?.length) throw new Error("Empty response from OpenAI");
@@ -79,6 +81,7 @@ Rules:
       },
     ],
     temperature: 0.2,
+    response_format: { type: "json_object" },
   });
 
   if (!response.choices?.length) throw new Error("Empty response from OpenAI");
