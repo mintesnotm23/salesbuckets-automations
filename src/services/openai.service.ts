@@ -40,6 +40,7 @@ Return ONLY valid JSON, no markdown fences.`,
     temperature: 0.3,
   });
 
+  if (!response.choices?.length) throw new Error("Empty response from OpenAI");
   const content = response.choices[0].message.content;
   if (!content) throw new Error("Empty response from OpenAI");
 
@@ -80,6 +81,7 @@ Rules:
     temperature: 0.2,
   });
 
+  if (!response.choices?.length) throw new Error("Empty response from OpenAI");
   const content = response.choices[0].message.content;
   if (!content) throw new Error("Empty response from OpenAI");
 

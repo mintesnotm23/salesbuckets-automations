@@ -18,7 +18,10 @@ interface PendingIssue {
   channelId: string;
   messageTs: string;
   attachments: FileAttachment[];
+  creating: boolean; // Guard against double-click
 }
+
+const VALID_PRIORITIES: readonly string[] = ["Highest", "High", "Medium", "Low", "Lowest"];
 
 // Stores pending issues keyed by userId-channelId
 const pendingIssues = new Map<string, PendingIssue>();
@@ -38,9 +41,21 @@ function getPendingKey(userId: string, channelId?: string): string {
   return `${userId}-${channelId || "dm"}`;
 }
 
+function getValidEntry(pendingKey: string): PendingIssue | null {
+  const entry = pendingIssues.get(pendingKey);
+  if (!entry) return null;
+  if (entry.expiresAt < Date.now()) {
+    pendingIssues.delete(pendingKey);
+    return null;
+  }
+  return entry;
+}
+
 function findPendingByThreadTs(threadTs: string): [string, PendingIssue] | undefined {
   for (const [key, entry] of pendingIssues.entries()) {
-    if (entry.messageTs === threadTs) return [key, entry];
+    if (entry.messageTs === threadTs && entry.expiresAt >= Date.now()) {
+      return [key, entry];
+    }
   }
   return undefined;
 }
@@ -79,7 +94,7 @@ function buildIssuePreview(structured: StructuredIssue, attachmentCount = 0) {
           type: "static_select" as const,
           action_id: "issue_quick_priority",
           placeholder: { type: "plain_text" as const, text: `Priority: ${structured.priority}` },
-          options: (["Highest", "High", "Medium", "Low", "Lowest"] as const).map((p) => ({
+          options: VALID_PRIORITIES.map((p) => ({
             text: { type: "plain_text" as const, text: p },
             value: p,
           })),
@@ -100,6 +115,8 @@ function buildIssuePreview(structured: StructuredIssue, attachmentCount = 0) {
   ];
 }
 
+const EXPIRED_MSG = "This issue has expired. Please use `/issue` again.";
+
 export function registerIssueCommand(app: App) {
   // --- /issue command ---
   app.command("/issue", async ({ command, ack, client }) => {
@@ -115,7 +132,6 @@ export function registerIssueCommand(app: App) {
       return;
     }
 
-    // Post a loading message
     const loadingMsg = await client.chat.postMessage({
       channel: command.channel_id,
       text: ":hourglass_flowing_sand: Processing your issue with AI...",
@@ -125,7 +141,6 @@ export function registerIssueCommand(app: App) {
       const structured = await withTimeout(structureIssue(command.text), 25000, "AI processing timed out");
       const pendingKey = getPendingKey(command.user_id, command.channel_id);
 
-      // Post the preview as a regular message (enables threading)
       const previewMsg = await client.chat.update({
         channel: command.channel_id,
         ts: loadingMsg.ts!,
@@ -140,6 +155,7 @@ export function registerIssueCommand(app: App) {
         channelId: command.channel_id,
         messageTs: previewMsg.ts!,
         attachments: [],
+        creating: false,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -156,10 +172,9 @@ export function registerIssueCommand(app: App) {
   app.message(async ({ message, client }) => {
     const msg = message as any;
 
-    // Only process threaded replies
+    // Only process threaded replies from real users
     if (!msg.thread_ts || msg.bot_id || msg.subtype) return;
 
-    // Find the pending issue for this thread
     const found = findPendingByThreadTs(msg.thread_ts);
     if (!found) return;
 
@@ -180,20 +195,29 @@ export function registerIssueCommand(app: App) {
           continue;
         }
 
-        entry.attachments.push({
-          url: file.url_private_download || file.url_private || "",
-          name: file.name || "unnamed",
-          mimetype: file.mimetype || "application/octet-stream",
-        });
-
-        await client.chat.postMessage({
-          channel: entry.channelId,
-          thread_ts: entry.messageTs,
-          text: `:paperclip: Attached \`${file.name}\` — will be uploaded to Jira when you confirm.`,
-        });
+        // Dedup by filename
+        const existing = entry.attachments.find((a) => a.name === file.name);
+        if (existing) {
+          existing.url = file.url_private_download || file.url_private || "";
+          await client.chat.postMessage({
+            channel: entry.channelId,
+            thread_ts: entry.messageTs,
+            text: `:paperclip: Updated \`${file.name}\`.`,
+          });
+        } else {
+          entry.attachments.push({
+            url: file.url_private_download || file.url_private || "",
+            name: file.name || "unnamed",
+            mimetype: file.mimetype || "application/octet-stream",
+          });
+          await client.chat.postMessage({
+            channel: entry.channelId,
+            thread_ts: entry.messageTs,
+            text: `:paperclip: Attached \`${file.name}\` — will be uploaded to Jira when you confirm.`,
+          });
+        }
       }
 
-      // Update preview to show attachment count
       await client.chat.update({
         channel: entry.channelId,
         ts: entry.messageTs,
@@ -226,7 +250,6 @@ export function registerIssueCommand(app: App) {
       entry.expiresAt = Date.now() + PENDING_TTL_MS;
       pendingIssues.set(pendingKey, entry);
 
-      // Update the preview in-place
       await client.chat.update({
         channel: entry.channelId,
         ts: entry.messageTs,
@@ -240,12 +263,12 @@ export function registerIssueCommand(app: App) {
         text: ":white_check_mark: Updated! Review the changes above.",
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error";
-      console.error("Error applying conversational edit:", message);
+      const errMsg = error instanceof Error ? error.message : "Unknown error";
+      console.error("Error applying conversational edit:", errMsg);
       await client.chat.postMessage({
         channel: entry.channelId,
         thread_ts: entry.messageTs,
-        text: `Sorry, couldn't apply that change: ${message}`,
+        text: `Sorry, couldn't apply that change: ${errMsg}`,
       });
     }
   });
@@ -255,12 +278,13 @@ export function registerIssueCommand(app: App) {
     await ack();
     const actionBody = body as BlockAction;
     const pendingKey = getPendingKey(actionBody.user.id, actionBody.channel?.id);
-    const entry = pendingIssues.get(pendingKey);
+    const entry = getValidEntry(pendingKey);
 
     if (!entry) return;
 
-    const selected = (actionBody.actions[0] as any).selected_option?.value;
-    if (!selected) return;
+    const action = actionBody.actions?.[0] as any;
+    const selected = action?.selected_option?.value;
+    if (!selected || !VALID_PRIORITIES.includes(selected)) return;
 
     entry.data.priority = selected as StructuredIssue["priority"];
     entry.expiresAt = Date.now() + PENDING_TTL_MS;
@@ -278,18 +302,22 @@ export function registerIssueCommand(app: App) {
     await ack();
     const actionBody = body as BlockAction;
     const pendingKey = getPendingKey(actionBody.user.id, actionBody.channel?.id);
-    const entry = pendingIssues.get(pendingKey);
+    const entry = getValidEntry(pendingKey);
 
     if (!entry) {
       if (actionBody.channel?.id) {
         await client.chat.postEphemeral({
           channel: actionBody.channel.id,
           user: actionBody.user.id,
-          text: "No pending issue found (may have expired). Please use `/issue` again.",
+          text: EXPIRED_MSG,
         });
       }
       return;
     }
+
+    // Guard against double-click
+    if (entry.creating) return;
+    entry.creating = true;
 
     const issue = entry.data;
 
@@ -308,6 +336,7 @@ export function registerIssueCommand(app: App) {
       );
 
       // Upload attachments
+      const failedAttachments: string[] = [];
       for (const attachment of entry.attachments) {
         try {
           const fileResponse = await axios.get(attachment.url, {
@@ -317,56 +346,57 @@ export function registerIssueCommand(app: App) {
           });
           await jiraService.addAttachment(jiraIssue.key, Buffer.from(fileResponse.data), attachment.name);
         } catch (error) {
-          console.error(`Failed to upload attachment ${attachment.name}:`, error);
+          console.error(`Failed to upload attachment ${attachment.name}:`, error instanceof Error ? error.message : error);
+          failedAttachments.push(attachment.name);
         }
       }
 
       pendingIssues.delete(pendingKey);
 
-      const attachmentNote = entry.attachments.length > 0
-        ? ` (${entry.attachments.length} file${entry.attachments.length > 1 ? "s" : ""} attached)`
-        : "";
+      let successText = `:white_check_mark: Issue created: <${jiraIssue.url}|${jiraIssue.key}> — *${escapeSlackMarkdown(issue.title)}*`;
 
-      // Update the preview message to show success
+      const uploadedCount = entry.attachments.length - failedAttachments.length;
+      if (uploadedCount > 0) {
+        successText += `\n:paperclip: ${uploadedCount} file${uploadedCount > 1 ? "s" : ""} attached`;
+      }
+      if (failedAttachments.length > 0) {
+        successText += `\n:warning: Failed to attach: ${failedAttachments.join(", ")}`;
+      }
+
       await client.chat.update({
         channel: entry.channelId,
         ts: entry.messageTs,
         blocks: [
           {
             type: "section",
-            text: {
-              type: "mrkdwn",
-              text: `:white_check_mark: Issue created: <${jiraIssue.url}|${jiraIssue.key}> — *${escapeSlackMarkdown(issue.title)}*${attachmentNote}`,
-            },
+            text: { type: "mrkdwn", text: successText },
           },
         ],
         text: `Issue created: ${jiraIssue.key}`,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error";
-      console.error("Error creating Jira issue:", message);
+      entry.creating = false; // Allow retry on failure
+      const errMsg = error instanceof Error ? error.message : "Unknown error";
+      console.error("Error creating Jira issue:", errMsg);
       if (actionBody.channel?.id) {
         await client.chat.postEphemeral({
           channel: actionBody.channel.id,
           user: actionBody.user.id,
-          text: `Failed to create Jira issue: ${message}`,
+          text: `Failed to create Jira issue: ${errMsg}`,
         });
       }
     }
   });
 
-  // --- Edit All → open modal with pre-filled values ---
+  // --- Edit All → open modal ---
   app.action("issue_edit", async ({ body, ack, client, respond }) => {
     await ack();
     const actionBody = body as BlockAction;
     const pendingKey = getPendingKey(actionBody.user.id, actionBody.channel?.id);
-    const entry = pendingIssues.get(pendingKey);
+    const entry = getValidEntry(pendingKey);
 
     if (!entry) {
-      await respond({
-        response_type: "ephemeral",
-        text: "This issue has expired (10 minutes). Please use `/issue` again.",
-      });
+      await respond({ response_type: "ephemeral", text: EXPIRED_MSG });
       return;
     }
 
@@ -422,7 +452,7 @@ export function registerIssueCommand(app: App) {
                 text: { type: "plain_text", text: issue.priority },
                 value: issue.priority,
               },
-              options: ["Highest", "High", "Medium", "Low", "Lowest"].map((p) => ({
+              options: VALID_PRIORITIES.map((p) => ({
                 text: { type: "plain_text", text: p },
                 value: p,
               })),
@@ -472,7 +502,7 @@ export function registerIssueCommand(app: App) {
       .filter(Boolean);
 
     const metadata = JSON.parse(view.private_metadata || "{}");
-    if (!metadata.channelId) return;
+    if (!metadata.channelId || !metadata.messageTs) return;
 
     const pendingKey = getPendingKey(body.user.id, metadata.channelId);
     const entry = pendingIssues.get(pendingKey);
@@ -485,30 +515,25 @@ export function registerIssueCommand(app: App) {
       acceptanceCriteria,
     };
 
-    const attachments = entry?.attachments || [];
-    const messageTs = metadata.messageTs || entry?.messageTs;
-
     pendingIssues.set(pendingKey, {
       data: updated,
       expiresAt: Date.now() + PENDING_TTL_MS,
       userId: body.user.id,
       channelId: metadata.channelId,
-      messageTs: messageTs || "",
-      attachments,
+      messageTs: metadata.messageTs,
+      attachments: entry?.attachments || [],
+      creating: false,
     });
 
-    // Update the preview message in-place
-    if (messageTs) {
-      try {
-        await app.client.chat.update({
-          channel: metadata.channelId,
-          ts: messageTs,
-          blocks: buildIssuePreview(updated, attachments.length),
-          text: `Issue preview: ${updated.title}`,
-        });
-      } catch (error) {
-        console.error("Failed to update preview message:", error);
-      }
+    try {
+      await app.client.chat.update({
+        channel: metadata.channelId,
+        ts: metadata.messageTs,
+        blocks: buildIssuePreview(updated, entry?.attachments?.length || 0),
+        text: `Issue preview: ${updated.title}`,
+      });
+    } catch (error) {
+      console.error("Failed to update preview message:", error);
     }
   });
 
