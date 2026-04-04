@@ -42,7 +42,7 @@ var CONFIG = {
 
 /**
  * Checks the configured Drive folder for new Google Doc meeting notes.
- * Called automatically by the 5-minute time-driven trigger.
+ * Called automatically by the 4-hour time-driven trigger.
  */
 function checkForNewMeetingNotes() {
   // Validate config on every run
@@ -81,16 +81,15 @@ function checkForNewMeetingNotes() {
       continue;
     }
 
-    // Read doc content
-    var doc;
+    // Read doc content (use Drive export — works with Gemini notes)
+    var body;
     try {
-      doc = DocumentApp.openById(fileId);
+      body = file.getAs('text/plain').getDataAsString();
     } catch (e) {
-      Logger.log('WARNING: Could not open doc ' + fileId + ': ' + e.message);
+      Logger.log('WARNING: Could not read doc "' + file.getName() + '": ' + e.message);
+      scriptProperties.setProperty('processed_' + fileId, 'unreadable');
       continue;
     }
-
-    var body = doc.getBody().getText();
 
     // Skip empty or placeholder docs
     if (!body || body.length < CONFIG.MIN_CONTENT_LENGTH) {
@@ -195,8 +194,16 @@ function parseMeetingInfo(docTitle, fileCreatedDate) {
   var title = docTitle;
   var date = Utilities.formatDate(fileCreatedDate, Session.getScriptTimeZone(), 'yyyy-MM-dd');
 
+  // Try: Gemini format "Meeting started YYYY/MM/DD HH:MM TZ - Notes by Gemini"
+  var match = docTitle.match(/^Meeting started (\d{4}\/\d{2}\/\d{2})\s+\d{2}:\d{2}\s+\w+\s*[-–—]\s*Notes by Gemini$/i);
+  if (match) {
+    title = 'Team Meeting';
+    date = match[1].replace(/\//g, '-');
+    return { title: title, date: date };
+  }
+
   // Try: "Something - Title - Month Day, Year"
-  var match = docTitle.match(/^(?:Meeting notes?\s*[-–—]\s*)?(.+?)\s*[-–—]\s*(\w+ \d{1,2},?\s*\d{4})$/i);
+  match = docTitle.match(/^(?:Meeting notes?\s*[-–—]\s*)?(.+?)\s*[-–—]\s*(\w+ \d{1,2},?\s*\d{4})$/i);
   if (match) {
     title = match[1].trim();
     date = formatDateString(match[2]) || date;
@@ -255,7 +262,7 @@ function findRecordingUrl(text) {
 // ── Trigger Management ─────────────────────────────────────────────────────────
 
 /**
- * Run this ONCE to set up the automatic 5-minute polling trigger.
+ * Run this ONCE to set up the automatic 4-hour polling trigger.
  * Go to Run menu → Run function → setupTrigger
  */
 function setupTrigger() {
@@ -288,6 +295,18 @@ function removeTrigger() {
     }
   }
   Logger.log('Removed ' + removed + ' trigger(s)');
+}
+
+// ── Utilities ──────────────────────────────────────────────────────────────────
+
+/**
+ * Clears all processed entries so docs can be re-scanned.
+ * Run this if you need to reprocess previously handled docs.
+ */
+function clearProcessed() {
+  var props = PropertiesService.getScriptProperties();
+  props.deleteAllProperties();
+  Logger.log('All properties cleared — next run will reprocess all docs');
 }
 
 // ── Cleanup ────────────────────────────────────────────────────────────────────
