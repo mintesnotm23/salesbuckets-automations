@@ -75,7 +75,7 @@ function checkForNewMeetingNotes() {
 
     var meetingInfo = parseMeetingInfo(file.getName(), file.getDateCreated());
     var meetingUrl = 'https://docs.google.com/document/d/' + fileId + '/edit';
-    var recordingUrl = findRecordingUrl(body);
+    var recordingUrl = findRecordingInFolder(folder, file.getName());
 
     var payload = {
       notes: body,
@@ -183,17 +183,33 @@ function formatDateString(dateStr) {
   }
 }
 
-// Search doc body for Drive video or Meet links
-function findRecordingUrl(text) {
-  var patterns = [
-    /https:\/\/drive\.google\.com\/file\/d\/[a-zA-Z0-9_-]+(?:\/[a-z]*)?/,
-    /https:\/\/meet\.google\.com\/[a-z]+-[a-z]+-[a-z]+/
-  ];
-  for (var i = 0; i < patterns.length; i++) {
-    var match = text.match(patterns[i]);
-    if (match) return match[0];
+// Find matching recording video in the same folder by date and closest time (within 30 min)
+function findRecordingInFolder(folder, notesFileName) {
+  var notesMatch = notesFileName.match(/(\d{4})\/(\d{2})\/(\d{2})\s+(\d{2}):(\d{2})/);
+  if (!notesMatch) return '';
+
+  var notesTime = new Date(notesMatch[1], notesMatch[2] - 1, notesMatch[3], notesMatch[4], notesMatch[5]);
+  var bestMatch = null;
+  var bestDiff = 30 * 60 * 1000; // 30 min max
+
+  var files = folder.getFiles();
+  while (files.hasNext()) {
+    var file = files.next();
+    if (file.getMimeType().indexOf('video/') !== 0) continue;
+
+    var videoMatch = file.getName().match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/);
+    if (!videoMatch) continue;
+
+    var videoTime = new Date(videoMatch[1], videoMatch[2] - 1, videoMatch[3], videoMatch[4], videoMatch[5]);
+    var diff = Math.abs(notesTime - videoTime);
+
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      bestMatch = file.getId();
+    }
   }
-  return '';
+
+  return bestMatch ? 'https://drive.google.com/file/d/' + bestMatch + '/view' : '';
 }
 
 // Create the 4-hour polling trigger (run once)
