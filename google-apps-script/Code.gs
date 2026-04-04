@@ -1,53 +1,21 @@
-/**
- * Meeting Notes Automation — Google Apps Script
- *
- * Polls a shared Google Drive folder for new Gemini meeting note docs,
- * reads their content, and POSTs to the SalesBuckets webhook for
- * Slack summarization and issue extraction.
- *
- * Setup: Fill in CONFIG below, then run setupTrigger() once.
- */
-
-// ── Configuration ──────────────────────────────────────────────────────────────
+// Meeting Notes Automation — Google Apps Script
 
 var CONFIG = {
-  // Google Drive folder ID where meeting notes are stored
-  // Get from URL: drive.google.com/drive/folders/<THIS_IS_THE_ID>
-  FOLDER_ID: '',
-
-  // Webhook endpoint on your Render app
+  FOLDER_ID: '1Zsb2Tmx4bGubts8gU48iY-QWn4iSR7Nv',
   WEBHOOK_URL: 'https://salesbuckets-automations.onrender.com/webhooks/meeting-notes',
-
-  // Must match WEBHOOK_API_KEY env var on Render
-  WEBHOOK_API_KEY: '',
-
-  // Slack channel IDs (right-click channel → View channel details → Channel ID)
-  SUMMARY_CHANNEL_ID: '',   // #meetings channel
-  ISSUES_CHANNEL_ID: '',    // #issues channel
-
-  // Retry webhook POST on failure
+  WEBHOOK_API_KEY: '3ca7e47a3bdcad3109e9f06b0099a79204c7903d898db1860ef8ea60b91a266b',
+  SUMMARY_CHANNEL_ID: 'C0AQP1DKMT5',
+  ISSUES_CHANNEL_ID: 'C0AR89R8ZL1',
   MAX_RETRIES: 2,
-
-  // Purge processed entries older than this many days
   CLEANUP_DAYS: 90,
-
-  // Skip docs with fewer characters than this
   MIN_CONTENT_LENGTH: 50,
-
-  // Max docs to process per run (avoid 6-min Apps Script timeout)
   MAX_DOCS_PER_RUN: 5
 };
 
-// ── Main Function ──────────────────────────────────────────────────────────────
-
-/**
- * Checks the configured Drive folder for new Google Doc meeting notes.
- * Called automatically by the 4-hour time-driven trigger.
- */
+// Main polling function — runs every 4 hours via trigger
 function checkForNewMeetingNotes() {
-  // Validate config on every run
   if (!CONFIG.FOLDER_ID || !CONFIG.WEBHOOK_URL || !CONFIG.WEBHOOK_API_KEY || !CONFIG.SUMMARY_CHANNEL_ID || !CONFIG.ISSUES_CHANNEL_ID) {
-    Logger.log('ERROR: CONFIG is incomplete. Fill in all required fields (FOLDER_ID, WEBHOOK_URL, WEBHOOK_API_KEY, SUMMARY_CHANNEL_ID, ISSUES_CHANNEL_ID).');
+    Logger.log('ERROR: CONFIG is incomplete.');
     return;
   }
 
@@ -57,7 +25,7 @@ function checkForNewMeetingNotes() {
   try {
     folder = DriveApp.getFolderById(CONFIG.FOLDER_ID);
   } catch (e) {
-    Logger.log('ERROR: Could not access folder ' + CONFIG.FOLDER_ID + ': ' + e.message);
+    Logger.log('ERROR: Could not access folder: ' + e.message);
     return;
   }
 
@@ -68,7 +36,7 @@ function checkForNewMeetingNotes() {
   while (files.hasNext()) {
     var file = files.next();
 
-    // Only process Google Docs
+    // Only Google Docs (skips videos, PDFs, etc.)
     if (file.getMimeType() !== 'application/vnd.google-apps.document') {
       continue;
     }
@@ -81,28 +49,34 @@ function checkForNewMeetingNotes() {
       continue;
     }
 
-    // Read doc content (use Drive export — works with Gemini notes)
+    // Read doc via Drive API export (works with Gemini notes)
     var body;
     try {
-      body = file.getAs('text/plain').getDataAsString();
+      var url = 'https://www.googleapis.com/drive/v3/files/' + fileId + '/export?mimeType=text/plain';
+      var response = UrlFetchApp.fetch(url, {
+        headers: { 'Authorization': 'Bearer ' + ScriptApp.getOAuthToken() },
+        muteHttpExceptions: true
+      });
+      if (response.getResponseCode() !== 200) {
+        throw new Error('Export returned ' + response.getResponseCode());
+      }
+      body = response.getContentText();
     } catch (e) {
-      Logger.log('WARNING: Could not read doc "' + file.getName() + '": ' + e.message);
+      Logger.log('WARNING: Could not read "' + file.getName() + '": ' + e.message);
       scriptProperties.setProperty('processed_' + fileId, 'unreadable');
       continue;
     }
 
-    // Skip empty or placeholder docs
+    // Skip empty or too-short docs
     if (!body || body.length < CONFIG.MIN_CONTENT_LENGTH) {
-      Logger.log('SKIP: Doc "' + file.getName() + '" too short (' + (body ? body.length : 0) + ' chars)');
+      Logger.log('SKIP: "' + file.getName() + '" too short (' + (body ? body.length : 0) + ' chars)');
       continue;
     }
 
-    // Parse meeting info from doc title
     var meetingInfo = parseMeetingInfo(file.getName(), file.getDateCreated());
     var meetingUrl = 'https://docs.google.com/document/d/' + fileId + '/edit';
     var recordingUrl = findRecordingUrl(body);
 
-    // Build webhook payload
     var payload = {
       notes: body,
       meetingTitle: meetingInfo.title,
@@ -116,7 +90,6 @@ function checkForNewMeetingNotes() {
       payload.recordingUrl = recordingUrl;
     }
 
-    // POST to webhook with retry
     var success = postToWebhook(payload);
 
     if (success) {
@@ -124,17 +97,17 @@ function checkForNewMeetingNotes() {
       processedCount++;
       Logger.log('OK: Processed "' + meetingInfo.title + '"');
     } else {
-      Logger.log('FAIL: Could not send "' + meetingInfo.title + '" — will retry next cycle');
+      Logger.log('FAIL: "' + meetingInfo.title + '" — will retry next cycle');
     }
 
-    // Guard against Apps Script 6-min execution timeout
+    // Avoid 6-min Apps Script timeout
     if (processedCount >= CONFIG.MAX_DOCS_PER_RUN) {
-      Logger.log('Hit max docs per run (' + CONFIG.MAX_DOCS_PER_RUN + '). Remaining docs will be processed next cycle.');
+      Logger.log('Hit max docs per run. Remaining will be processed next cycle.');
       break;
     }
   }
 
-  // Run cleanup once per day (not every 5-min cycle)
+  // Daily cleanup of old entries
   var lastCleanup = scriptProperties.getProperty('last_cleanup_date') || '';
   var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
   if (lastCleanup !== today) {
@@ -145,12 +118,7 @@ function checkForNewMeetingNotes() {
   Logger.log('Done. Processed: ' + processedCount + ', Already done: ' + skippedCount);
 }
 
-// ── Webhook ────────────────────────────────────────────────────────────────────
-
-/**
- * POSTs payload to the webhook with retry logic.
- * Returns true on success (HTTP 200), false otherwise.
- */
+// POST payload to webhook with retry
 function postToWebhook(payload) {
   var options = {
     method: 'post',
@@ -163,74 +131,48 @@ function postToWebhook(payload) {
   for (var attempt = 0; attempt <= CONFIG.MAX_RETRIES; attempt++) {
     try {
       var response = UrlFetchApp.fetch(CONFIG.WEBHOOK_URL, options);
-      var code = response.getResponseCode();
-
-      if (code === 200) {
-        return true;
-      }
-
-      Logger.log('Webhook returned ' + code + ' (attempt ' + (attempt + 1) + '): ' + response.getContentText().substring(0, 200));
+      if (response.getResponseCode() === 200) return true;
+      Logger.log('Webhook returned ' + response.getResponseCode() + ' (attempt ' + (attempt + 1) + ')');
     } catch (e) {
-      Logger.log('Webhook request failed (attempt ' + (attempt + 1) + '): ' + e.message);
+      Logger.log('Webhook failed (attempt ' + (attempt + 1) + '): ' + e.message);
     }
-
-    // Brief pause before retry
-    if (attempt < CONFIG.MAX_RETRIES) {
-      Utilities.sleep(2000);
-    }
+    if (attempt < CONFIG.MAX_RETRIES) Utilities.sleep(2000);
   }
 
   return false;
 }
 
-// ── Parsing Helpers ────────────────────────────────────────────────────────────
-
-/**
- * Extracts meeting title and date from the doc title.
- * Gemini typically names docs like "Meeting notes - Weekly Standup - April 3, 2026"
- * but the format can vary.
- */
+// Extract title and date from doc name
 function parseMeetingInfo(docTitle, fileCreatedDate) {
   var title = docTitle;
   var date = Utilities.formatDate(fileCreatedDate, Session.getScriptTimeZone(), 'yyyy-MM-dd');
 
-  // Try: Gemini format "Meeting started YYYY/MM/DD HH:MM TZ - Notes by Gemini"
+  // Gemini format: "Meeting started 2026/03/17 12:40 ADT - Notes by Gemini"
   var match = docTitle.match(/^Meeting started (\d{4}\/\d{2}\/\d{2})\s+\d{2}:\d{2}\s+\w+\s*[-–—]\s*Notes by Gemini$/i);
   if (match) {
-    title = 'Team Meeting';
-    date = match[1].replace(/\//g, '-');
-    return { title: title, date: date };
+    return { title: 'Team Meeting', date: match[1].replace(/\//g, '-') };
   }
 
-  // Try: "Something - Title - Month Day, Year"
+  // "Title - Month Day, Year"
   match = docTitle.match(/^(?:Meeting notes?\s*[-–—]\s*)?(.+?)\s*[-–—]\s*(\w+ \d{1,2},?\s*\d{4})$/i);
   if (match) {
-    title = match[1].trim();
-    date = formatDateString(match[2]) || date;
-    return { title: title, date: date };
+    return { title: match[1].trim(), date: formatDateString(match[2]) || date };
   }
 
-  // Try: "Something - Title - YYYY-MM-DD"
+  // "Title - YYYY-MM-DD"
   match = docTitle.match(/^(?:Meeting notes?\s*[-–—]\s*)?(.+?)\s*[-–—]\s*(\d{4}-\d{2}-\d{2})$/i);
   if (match) {
-    title = match[1].trim();
-    date = match[2];
-    return { title: title, date: date };
+    return { title: match[1].trim(), date: match[2] };
   }
 
-  // Try: Strip "Meeting notes - " prefix if present
+  // Strip "Meeting notes - " prefix
   match = docTitle.match(/^Meeting notes?\s*[-–—]\s*(.+)$/i);
-  if (match) {
-    title = match[1].trim();
-  }
+  if (match) title = match[1].trim();
 
   return { title: title, date: date };
 }
 
-/**
- * Converts "April 3, 2026" or "April 3 2026" to "2026-04-03".
- * Returns null if parsing fails.
- */
+// Convert "April 3, 2026" to "2026-04-03"
 function formatDateString(dateStr) {
   try {
     var d = new Date(dateStr);
@@ -241,50 +183,32 @@ function formatDateString(dateStr) {
   }
 }
 
-/**
- * Searches doc body for Google Drive recording/video links.
- * Returns the first match or empty string.
- */
+// Search doc body for Drive video or Meet links
 function findRecordingUrl(text) {
   var patterns = [
     /https:\/\/drive\.google\.com\/file\/d\/[a-zA-Z0-9_-]+(?:\/[a-z]*)?/,
     /https:\/\/meet\.google\.com\/[a-z]+-[a-z]+-[a-z]+/
   ];
-
   for (var i = 0; i < patterns.length; i++) {
     var match = text.match(patterns[i]);
     if (match) return match[0];
   }
-
   return '';
 }
 
-// ── Trigger Management ─────────────────────────────────────────────────────────
-
-/**
- * Run this ONCE to set up the automatic 4-hour polling trigger.
- * Go to Run menu → Run function → setupTrigger
- */
+// Create the 4-hour polling trigger (run once)
 function setupTrigger() {
-  // Remove any existing triggers for this function first
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
     if (triggers[i].getHandlerFunction() === 'checkForNewMeetingNotes') {
       ScriptApp.deleteTrigger(triggers[i]);
     }
   }
-
-  ScriptApp.newTrigger('checkForNewMeetingNotes')
-    .timeBased()
-    .everyHours(4)
-    .create();
-
-  Logger.log('Trigger created: checkForNewMeetingNotes runs every 4 hours');
+  ScriptApp.newTrigger('checkForNewMeetingNotes').timeBased().everyHours(4).create();
+  Logger.log('Trigger created: runs every 4 hours');
 }
 
-/**
- * Removes the automatic trigger. Run this to stop polling.
- */
+// Remove the polling trigger
 function removeTrigger() {
   var triggers = ScriptApp.getProjectTriggers();
   var removed = 0;
@@ -297,24 +221,13 @@ function removeTrigger() {
   Logger.log('Removed ' + removed + ' trigger(s)');
 }
 
-// ── Utilities ──────────────────────────────────────────────────────────────────
-
-/**
- * Clears all processed entries so docs can be re-scanned.
- * Run this if you need to reprocess previously handled docs.
- */
+// Clear all processed entries (reprocess everything on next run)
 function clearProcessed() {
-  var props = PropertiesService.getScriptProperties();
-  props.deleteAllProperties();
-  Logger.log('All properties cleared — next run will reprocess all docs');
+  PropertiesService.getScriptProperties().deleteAllProperties();
+  Logger.log('All properties cleared');
 }
 
-// ── Cleanup ────────────────────────────────────────────────────────────────────
-
-/**
- * Purges processed entries older than CLEANUP_DAYS to stay within
- * the 500KB ScriptProperties limit.
- */
+// Purge processed entries older than CLEANUP_DAYS
 function cleanupOldProperties(scriptProperties) {
   var allProps = scriptProperties.getProperties();
   var cutoff = new Date();
@@ -323,7 +236,6 @@ function cleanupOldProperties(scriptProperties) {
 
   for (var key in allProps) {
     if (key.indexOf('processed_') !== 0) continue;
-
     var timestamp = new Date(allProps[key]);
     if (isNaN(timestamp.getTime()) || timestamp < cutoff) {
       scriptProperties.deleteProperty(key);
@@ -331,7 +243,5 @@ function cleanupOldProperties(scriptProperties) {
     }
   }
 
-  if (removed > 0) {
-    Logger.log('Cleanup: removed ' + removed + ' old entries');
-  }
+  if (removed > 0) Logger.log('Cleanup: removed ' + removed + ' old entries');
 }
