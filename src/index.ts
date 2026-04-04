@@ -7,7 +7,6 @@ import { registerMeetingActions } from "./commands/meeting.actions";
 import { processMeetingNotes } from "./services/meeting-notes.service";
 import { jiraService } from "./services/jira.service";
 
-// Use ExpressReceiver so we can add custom routes (webhooks)
 const receiver = new ExpressReceiver({
   signingSecret: config.slack.signingSecret,
 });
@@ -17,20 +16,16 @@ const app = new App({
   receiver,
 });
 
-// Register Slack commands
 registerIssueCommand(app);
 registerAskCommand(app);
 registerMeetingActions(app);
 
-// JSON body parsing for custom routes (ExpressReceiver doesn't include this)
 receiver.router.use(express.json());
 
-// Health check
 receiver.router.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// Webhook auth middleware
 function webhookAuth(req: any, res: any, next: any) {
   const apiKey = req.headers["x-api-key"];
   if (apiKey !== config.webhookApiKey) {
@@ -40,7 +35,6 @@ function webhookAuth(req: any, res: any, next: any) {
   next();
 }
 
-// Google Apps Script sends meeting notes here
 receiver.router.post("/webhooks/meeting-notes", webhookAuth, async (req, res) => {
   try {
     const { notes, meetingTitle, meetingDate, meetingUrl, recordingUrl, summaryChannelId, issuesChannelId } = req.body;
@@ -68,10 +62,8 @@ receiver.router.post("/webhooks/meeting-notes", webhookAuth, async (req, res) =>
   }
 });
 
-// Startup
 (async () => {
   try {
-    // Validate external connections
     await jiraService.validateConnection();
     console.log("Jira connection verified");
 
@@ -83,7 +75,6 @@ receiver.router.post("/webhooks/meeting-notes", webhookAuth, async (req, res) =>
   }
 })();
 
-// Graceful shutdown
 process.on("SIGTERM", async () => {
   console.log("SIGTERM received, shutting down");
   await app.stop();
