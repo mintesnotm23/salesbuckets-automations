@@ -269,10 +269,10 @@ function setupTrigger() {
 
   ScriptApp.newTrigger('checkForNewMeetingNotes')
     .timeBased()
-    .everyMinutes(5)
+    .everyHours(4)
     .create();
 
-  Logger.log('Trigger created: checkForNewMeetingNotes runs every 5 minutes');
+  Logger.log('Trigger created: checkForNewMeetingNotes runs every 4 hours');
 }
 
 /**
