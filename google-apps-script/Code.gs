@@ -285,9 +285,18 @@ function findRecordingInFolder(folder, notesFileName) {
     }
   }
 
-  return bestMatch
-    ? "https://drive.google.com/file/d/" + bestMatch + "/view"
-    : "";
+  if (bestMatch) {
+    try {
+      DriveApp.getFileById(bestMatch).setSharing(
+        DriveApp.Access.ANYONE_WITH_LINK,
+        DriveApp.Permission.VIEW,
+      );
+    } catch (e) {
+      Logger.log("WARNING: Could not set sharing on recording: " + e.message);
+    }
+    return "https://drive.google.com/file/d/" + bestMatch + "/view";
+  }
+  return "";
 }
 
 // Create the 4-hour polling trigger (run once)
